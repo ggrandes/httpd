@@ -18,6 +18,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public class HttpServer {
+	public static final String DIRECTORY_INDEX = "index.html";
 	public static final int DEFAULT_READ_TIMEOUT = 60000;
 
 	final ExecutorService pool = Executors.newCachedThreadPool();
@@ -147,11 +148,14 @@ public class HttpServer {
 				} else if (!"GET".equals(METHOD)) {
 					throw HttpError.HTTP_405;
 				} else {
-					final File f = new File(baseDir, URI).getCanonicalFile();
+					File f = new File(baseDir, URI).getCanonicalFile();
 					if (!f.getPath().startsWith(baseDir.getPath())) {
 						throw HttpError.HTTP_400;
 					}
-					if (!f.exists() || f.isDirectory()) {
+					if (f.isDirectory()) {
+						f = new File(f, DIRECTORY_INDEX);
+					}
+					if (!f.exists()) {
 						throw HttpError.HTTP_404;
 					}
 					out.append(HDR_HTTP_VER).append(" 200 OK").append(CRLF);
