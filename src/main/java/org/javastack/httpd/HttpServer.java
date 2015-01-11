@@ -1,5 +1,6 @@
 package org.javastack.httpd;
 
+import java.io.BufferedOutputStream;
 import java.io.BufferedReader;
 import java.io.Closeable;
 import java.io.File;
@@ -20,6 +21,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class HttpServer {
 	public static final String DIRECTORY_INDEX = "index.html";
 	public static final int DEFAULT_READ_TIMEOUT = 60000;
+	private static final int BUFF_LEN = 512;
 
 	final ExecutorService pool = Executors.newCachedThreadPool();
 	final AtomicBoolean running = new AtomicBoolean(false);
@@ -131,8 +133,8 @@ public class HttpServer {
 			PrintStream out = null;
 			FileInputStream fis = null;
 			try {
-				in = new BufferedReader(new InputStreamReader(client.getInputStream()));
-				out = new PrintStream(client.getOutputStream());
+				in = new BufferedReader(new InputStreamReader(client.getInputStream()), BUFF_LEN);
+				out = new PrintStream(new BufferedOutputStream(client.getOutputStream(), BUFF_LEN));
 				// Read Head (GET / HTTP/1.0)
 				final String header = in.readLine();
 				final String[] hdrTokens = header.split(" ");
@@ -166,7 +168,7 @@ public class HttpServer {
 					out.append(CRLF);
 					//
 					fis = new FileInputStream(f);
-					final byte[] buf = new byte[512];
+					final byte[] buf = new byte[BUFF_LEN];
 					int len = 0;
 					while ((len = fis.read(buf)) != -1) {
 						out.write(buf, 0, len);
