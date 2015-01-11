@@ -48,6 +48,7 @@
 					<forceCreation>true</forceCreation>
 					<archive>
 						<manifestEntries>
+							<Main-Class>org.javastack.httpd.HttpServer</Main-Class>
 							<Built-By>maven</Built-By>
 						</manifestEntries>
 					</archive>
