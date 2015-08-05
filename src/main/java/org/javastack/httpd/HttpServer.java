@@ -6,33 +6,44 @@ import java.io.Closeable;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.PrintStream;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.net.URLDecoder;
+import java.util.Arrays;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipException;
+import java.util.zip.ZipFile;
 
 public class HttpServer {
 	public static final String DIRECTORY_INDEX = "index.html";
 	public static final int DEFAULT_READ_TIMEOUT = 60000;
+	private static final byte[] ZIP_SIGNATURE = {
+			0x50, 0x4b, 0x03, 0x04
+	};
 	private static final int BUFF_LEN = 512;
 
 	final ExecutorService pool = Executors.newCachedThreadPool();
 	final AtomicBoolean running = new AtomicBoolean(false);
 	final int port;
 	final File baseDir;
+	final ZipFile zipFile;
 
 	int readTimeout = DEFAULT_READ_TIMEOUT;
 
 	public static void main(final String[] args) throws Throwable {
 		if (args.length < 2) {
-			System.out.println(HttpServer.class.getName() + " <port> <directory>");
+			System.out.println(HttpServer.class.getName() + " <port> <directory|zipfile>");
 			return;
 		}
 		final int port = Integer.parseInt(args[0]);
@@ -44,6 +55,7 @@ public class HttpServer {
 	public HttpServer(final int port, final String baseDir) throws IOException {
 		this.port = port;
 		this.baseDir = new File(baseDir).getCanonicalFile();
+		this.zipFile = zipFile(this.baseDir);
 	}
 
 	public void start() {
@@ -54,10 +66,28 @@ public class HttpServer {
 	public void stop() {
 		running.set(false);
 		shutdownAndAwaitTermination(pool);
+		Closer.close(zipFile);
 	}
 
 	public void setReadTimeoutMillis(final int readTimeout) {
 		this.readTimeout = readTimeout;
+	}
+
+	ZipFile zipFile(final File file) throws ZipException, IOException {
+		if (file.isFile()) {
+			FileInputStream is = null;
+			try {
+				final byte[] signature = new byte[ZIP_SIGNATURE.length];
+				is = new FileInputStream(file);
+				final int len = is.read(signature);
+				if ((len == signature.length) && Arrays.equals(ZIP_SIGNATURE, signature)) {
+					return new ZipFile(file);
+				}
+			} finally {
+				Closer.close(is);
+			}
+		}
+		return null;
 	}
 
 	boolean shutdownAndAwaitTermination(final ExecutorService pool) {
@@ -131,7 +161,8 @@ public class HttpServer {
 		public void run() {
 			BufferedReader in = null;
 			PrintStream out = null;
-			FileInputStream fis = null;
+			InputStream fis = null;
+			long fisLength = 0;
 			try {
 				in = new BufferedReader(new InputStreamReader(client.getInputStream()), BUFF_LEN);
 				out = new PrintStream(new BufferedOutputStream(client.getOutputStream(), BUFF_LEN));
@@ -150,33 +181,39 @@ public class HttpServer {
 				} else if (!"GET".equals(METHOD)) {
 					throw HttpError.HTTP_405;
 				} else {
-					File f = new File(baseDir, URI).getCanonicalFile();
-					if (!f.getPath().startsWith(baseDir.getPath())) {
-						throw HttpError.HTTP_400;
+					if (zipFile != null) {
+						String zName = mapZipFile(URI);
+						ZipEntry zipEntry = zipFile.getEntry(zName);
+						if ((zipEntry != null) && zipEntry.isDirectory()) {
+							zName = mapZipFile(URI + "/" + DIRECTORY_INDEX);
+							zipEntry = zipFile.getEntry(zName);
+						}
+						if (zipEntry != null) {
+							fisLength = zipEntry.getSize();
+							fis = zipFile.getInputStream(zipEntry);
+						}
+					} else {
+						File f = new File(baseDir, URI).getCanonicalFile();
+						if (!f.getPath().startsWith(baseDir.getPath())) {
+							throw HttpError.HTTP_400;
+						}
+						if (f.isDirectory()) {
+							f = new File(f, DIRECTORY_INDEX);
+						}
+						if (f.isFile()) {
+							fisLength = f.length();
+							fis = new FileInputStream(f);
+						}
 					}
-					if (f.isDirectory()) {
-						f = new File(f, DIRECTORY_INDEX);
-					}
-					if (!f.exists()) {
+					if (fis == null) {
 						throw HttpError.HTTP_404;
 					}
-					out.append(HDR_HTTP_VER).append(" 200 OK").append(CRLF);
-					out.append("Content-Length: ").append(String.valueOf(f.length())).append(CRLF);
-					out.append(HDR_CACHE_CONTROL).append(CRLF);
-					out.append(HDR_CONNECTION_CLOSE).append(CRLF);
-					out.append(HDR_SERVER).append(CRLF);
-					out.append(CRLF);
-					//
-					fis = new FileInputStream(f);
-					final byte[] buf = new byte[BUFF_LEN];
-					int len = 0;
-					while ((len = fis.read(buf)) != -1) {
-						out.write(buf, 0, len);
-					}
-					out.flush();
+					sendFile(fis, out, fisLength);
 				}
 			} catch (HttpError e) {
 				sendError(out, e, e.getHttpText());
+			} catch (URISyntaxException e) {
+				sendError(out, HttpError.HTTP_400, e.getMessage());
 			} catch (SocketTimeoutException e) {
 				sendError(out, HttpError.HTTP_408, e.getMessage());
 			} catch (IOException e) {
@@ -187,6 +224,33 @@ public class HttpServer {
 				Closer.close(out);
 				Closer.close(client);
 			}
+		}
+
+		String mapZipFile(String uri) throws URISyntaxException {
+			uri = new URI(uri).normalize().getPath();
+			if ((uri.length() > 0) && (uri.charAt(0) == '/')) {
+				uri = uri.substring(1);
+			}
+			if (uri.isEmpty() || uri.endsWith("/")) {
+				return uri + DIRECTORY_INDEX;
+			}
+			return uri;
+		}
+
+		void sendFile(final InputStream is, final PrintStream out, long length) throws IOException {
+			out.append(HDR_HTTP_VER).append(" 200 OK").append(CRLF);
+			out.append("Content-Length: ").append(String.valueOf(length)).append(CRLF);
+			out.append(HDR_CACHE_CONTROL).append(CRLF);
+			out.append(HDR_CONNECTION_CLOSE).append(CRLF);
+			out.append(HDR_SERVER).append(CRLF);
+			out.append(CRLF);
+			//
+			final byte[] buf = new byte[BUFF_LEN];
+			int len = 0;
+			while ((len = is.read(buf)) != -1) {
+				out.write(buf, 0, len);
+			}
+			out.flush();
 		}
 
 		void sendError(final PrintStream out, final HttpError e, final String body) {
@@ -240,6 +304,15 @@ public class HttpServer {
 
 	static class Closer {
 		static void close(final Closeable c) {
+			if (c != null) {
+				try {
+					c.close();
+				} catch (Exception ign) {
+				}
+			}
+		}
+
+		static void close(final ZipFile c) {
 			if (c != null) {
 				try {
 					c.close();
