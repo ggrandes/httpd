@@ -16,7 +16,11 @@ import java.net.SocketTimeoutException;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.URLDecoder;
+import java.text.SimpleDateFormat;
 import java.util.Arrays;
+import java.util.Date;
+import java.util.Locale;
+import java.util.TimeZone;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -32,6 +36,7 @@ public class HttpServer {
 			0x50, 0x4b, 0x03, 0x04
 	};
 	private static final int BUFF_LEN = 512;
+	private final SimpleDateFormat dateFormat;
 
 	final ExecutorService pool = Executors.newCachedThreadPool();
 	final AtomicBoolean running = new AtomicBoolean(false);
@@ -56,6 +61,8 @@ public class HttpServer {
 		this.port = port;
 		this.baseDir = new File(baseDir).getCanonicalFile();
 		this.zipFile = zipFile(this.baseDir);
+		this.dateFormat = new SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss z", Locale.US);
+		this.dateFormat.setTimeZone(TimeZone.getTimeZone("GMT"));
 	}
 
 	public void start() {
@@ -163,6 +170,7 @@ public class HttpServer {
 			PrintStream out = null;
 			InputStream fis = null;
 			long fisLength = 0;
+			Date lastModified = null;
 			try {
 				in = new BufferedReader(new InputStreamReader(client.getInputStream()), BUFF_LEN);
 				out = new PrintStream(new BufferedOutputStream(client.getOutputStream(), BUFF_LEN));
@@ -182,6 +190,7 @@ public class HttpServer {
 					throw HttpError.HTTP_405;
 				} else {
 					if (zipFile != null) {
+						lastModified = new Date(baseDir.lastModified()); 
 						String zName = mapZipFile(URI);
 						ZipEntry zipEntry = zipFile.getEntry(zName);
 						if ((zipEntry != null) && zipEntry.isDirectory()) {
@@ -203,12 +212,13 @@ public class HttpServer {
 						if (f.isFile()) {
 							fisLength = f.length();
 							fis = new FileInputStream(f);
+							lastModified = new Date(f.lastModified());
 						}
 					}
 					if (fis == null) {
 						throw HttpError.HTTP_404;
 					}
-					sendFile(fis, out, fisLength);
+					sendFile(fis, out, fisLength, lastModified);
 				}
 			} catch (HttpError e) {
 				sendError(out, e, e.getHttpText());
@@ -237,9 +247,19 @@ public class HttpServer {
 			return uri;
 		}
 
-		void sendFile(final InputStream is, final PrintStream out, long length) throws IOException {
+		synchronized String getHttpDate(final Date d) {
+			return dateFormat.format(d);
+		}
+
+		void sendFile(final InputStream is, final PrintStream out, long length, final Date lastModified)
+				throws IOException {
 			out.append(HDR_HTTP_VER).append(" 200 OK").append(CRLF);
 			out.append("Content-Length: ").append(String.valueOf(length)).append(CRLF);
+			out.append("Date: ").append(getHttpDate(new Date())).append(CRLF);
+			if (lastModified != null) {
+				out.append("Last-Modified: ").append(getHttpDate(lastModified)).append(CRLF);
+			}
+
 			out.append(HDR_CACHE_CONTROL).append(CRLF);
 			out.append(HDR_CONNECTION_CLOSE).append(CRLF);
 			out.append(HDR_SERVER).append(CRLF);

@@ -2,7 +2,7 @@
 
 httpd is a simple HTTP Server in Java. Open Source project under Apache License v2.0
 
-### Current Stable Version is [1.1.0](https://search.maven.org/#search|ga|1|g%3Aorg.javastack%20a%3Ahttpd)
+### Current Stable Version is [1.1.1](https://search.maven.org/#search|ga|1|g%3Aorg.javastack%20a%3Ahttpd)
 
 ---
 
@@ -31,7 +31,7 @@ Add the dependency to your pom.xml:
     <dependency>
         <groupId>org.javastack</groupId>
         <artifactId>httpd</artifactId>
-        <version>1.1.0</version>
+        <version>1.1.1</version>
     </dependency>
 
 
