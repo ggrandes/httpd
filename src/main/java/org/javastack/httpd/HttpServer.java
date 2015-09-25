@@ -186,11 +186,11 @@ public class HttpServer {
 				}
 				if (!"HTTP/1.0".equals(VERSION) && !"HTTP/1.1".equals(VERSION)) {
 					throw HttpError.HTTP_400;
-				} else if (!"GET".equals(METHOD)) {
+				} else if (!"GET".equals(METHOD) && !"HEAD".equals(METHOD)) {
 					throw HttpError.HTTP_405;
 				} else {
 					if (zipFile != null) {
-						lastModified = new Date(baseDir.lastModified()); 
+						lastModified = new Date(baseDir.lastModified());
 						String zName = mapZipFile(URI);
 						ZipEntry zipEntry = zipFile.getEntry(zName);
 						if ((zipEntry != null) && zipEntry.isDirectory()) {
@@ -218,7 +218,7 @@ public class HttpServer {
 					if (fis == null) {
 						throw HttpError.HTTP_404;
 					}
-					sendFile(fis, out, fisLength, lastModified);
+					sendFile(fis, out, fisLength, lastModified, !"HEAD".equals(METHOD));
 				}
 			} catch (HttpError e) {
 				sendError(out, e, e.getHttpText());
@@ -251,8 +251,8 @@ public class HttpServer {
 			return dateFormat.format(d);
 		}
 
-		void sendFile(final InputStream is, final PrintStream out, long length, final Date lastModified)
-				throws IOException {
+		void sendFile(final InputStream is, final PrintStream out, long length, final Date lastModified,
+				final boolean body) throws IOException {
 			out.append(HDR_HTTP_VER).append(" 200 OK").append(CRLF);
 			out.append("Content-Length: ").append(String.valueOf(length)).append(CRLF);
 			out.append("Date: ").append(getHttpDate(new Date())).append(CRLF);
@@ -265,10 +265,12 @@ public class HttpServer {
 			out.append(HDR_SERVER).append(CRLF);
 			out.append(CRLF);
 			//
-			final byte[] buf = new byte[BUFF_LEN];
-			int len = 0;
-			while ((len = is.read(buf)) != -1) {
-				out.write(buf, 0, len);
+			if (body) {
+				final byte[] buf = new byte[BUFF_LEN];
+				int len = 0;
+				while ((len = is.read(buf)) != -1) {
+					out.write(buf, 0, len);
+				}
 			}
 			out.flush();
 		}
