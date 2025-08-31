@@ -31,12 +31,19 @@ import java.util.zip.ZipFile;
 
 public class HttpServer {
 	public static final String DIRECTORY_INDEX = "index.html";
+	public static final int DEFAULT_ACCEPT_BACKLOG = 511;
+	public static final int DEFAULT_ACCEPT_TIMEOUT = 1000;
 	public static final int DEFAULT_READ_TIMEOUT = 60000;
+	public static final boolean DEFAULT_TEST_ENABLE = true;
+	public static final boolean DEFAULT_ACCESS_LOG_ENABLE = false;
+
 	private static final byte[] ZIP_SIGNATURE = {
 			0x50, 0x4b, 0x03, 0x04
 	};
 	private static final int BUFF_LEN = 512;
 	private final SimpleDateFormat dateFormat;
+	private final SimpleDateFormat accessFormat;
+	private final SimpleDateFormat isoFormat;
 
 	final ExecutorService pool = Executors.newCachedThreadPool();
 	final AtomicBoolean running = new AtomicBoolean(false);
@@ -44,25 +51,36 @@ public class HttpServer {
 	final File baseDir;
 	final ZipFile zipFile;
 
+	int acceptBacklog = DEFAULT_ACCEPT_BACKLOG;
+	int acceptTimeout = DEFAULT_ACCEPT_TIMEOUT;
 	int readTimeout = DEFAULT_READ_TIMEOUT;
+	boolean testEnabled = DEFAULT_TEST_ENABLE;
+	boolean accessLogEnabled = DEFAULT_ACCESS_LOG_ENABLE;
+	boolean debugLogEnabled = false;
 
 	public static void main(final String[] args) throws Throwable {
 		if (args.length < 2) {
-			System.out.println(HttpServer.class.getName() + " <port> <directory|zipfile>");
+			System.out.println(HttpServer.class.getName() + " <port> <directory|zipfile|none>");
 			return;
 		}
 		final int port = Integer.parseInt(args[0]);
 		final String dir = args[1];
 		final HttpServer srv = new HttpServer(port, dir);
+		srv.setTestEnabled(getProperty("httpd.test.enable", DEFAULT_TEST_ENABLE));
+		srv.setAccessLogEnabled(getProperty("httpd.access.enable", DEFAULT_ACCESS_LOG_ENABLE));
+		srv.setDebugLogEnabled(getProperty("httpd.debug.enable", false));
 		srv.start();
 	}
 
 	public HttpServer(final int port, final String baseDir) throws IOException {
 		this.port = port;
-		this.baseDir = new File(baseDir).getCanonicalFile();
+		this.baseDir = ("none".equals(baseDir) ? null : new File(baseDir).getCanonicalFile());
 		this.zipFile = zipFile(this.baseDir);
 		this.dateFormat = new SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss z", Locale.US);
 		this.dateFormat.setTimeZone(TimeZone.getTimeZone("GMT"));
+		this.accessFormat = new SimpleDateFormat("[dd/MMM/yyyy:HH:mm:ss Z]");
+		this.isoFormat = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss,SSSXXX");
+		this.testEnabled = ((baseDir == null) ? true : this.testEnabled);
 	}
 
 	public void start() {
@@ -76,11 +94,152 @@ public class HttpServer {
 		Closer.close(zipFile);
 	}
 
+	public void setAcceptBacklog(final int acceptBacklog) {
+		this.acceptBacklog = acceptBacklog;
+	}
+
+	public void setAcceptTimeoutMillis(final int acceptTimeout) {
+		this.acceptTimeout = acceptTimeout;
+	}
+
 	public void setReadTimeoutMillis(final int readTimeout) {
 		this.readTimeout = readTimeout;
 	}
 
+	public void setTestEnabled(final boolean testEnabled) {
+		this.testEnabled = testEnabled;
+	}
+
+	public void setAccessLogEnabled(final boolean accessLogEnabled) {
+		this.accessLogEnabled = accessLogEnabled;
+	}
+
+	public void setDebugLogEnabled(final boolean debugLogEnabled) {
+		this.debugLogEnabled = debugLogEnabled;
+	}
+
+	String getHttpDate(final Date d) {
+		synchronized (dateFormat) {
+			return dateFormat.format(d);
+		}
+	}
+
+	String getAccessDate(final Date d) {
+		synchronized (accessFormat) {
+			return accessFormat.format(d);
+		}
+	}
+
+	String getIsoDate(final Date d) {
+		synchronized (isoFormat) {
+			return isoFormat.format(d);
+		}
+	}
+
+	void debug(final String msg) {
+		System.err.println(getIsoDate(new Date()) + " [DEBUG] " + msg);
+	}
+
+	private static boolean getProperty(final String name, final boolean def) {
+		final String val = System.getProperty(name);
+		if (val != null) {
+			switch (val.trim().toUpperCase(Locale.US)) {
+				case "TRUE":
+					return true;
+				case "FALSE":
+					return false;
+			}
+		}
+		// Undefined/Unknown > Default
+		return def;
+	}
+
+	private static final char[] hexDigit = {
+			'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E', 'F'
+	};
+
+	private static char toHex(final int nibble) {
+		return hexDigit[(nibble & 0xF)];
+	}
+
+	private static final void escapeLog(final CharSequence in, final StringBuilder sb) {
+		// Pseudo https://tools.ietf.org/html/rfc7159
+		final int len = in.length();
+		for (int i = 0; i < len; i++) {
+			final char c = in.charAt(i);
+			switch (c) {
+				case '"':
+					sb.append("\\\"");
+					break;
+				case '\\':
+					sb.append("\\\\");
+					break;
+				// case '/':
+				// sb.append("\\/");
+				// break;
+				case '\b':
+					sb.append("\\b");
+					break;
+				case '\f':
+					sb.append("\\f");
+					break;
+				case '\n':
+					sb.append("\\n");
+					break;
+				case '\r':
+					sb.append("\\r");
+					break;
+				case '\t':
+					sb.append("\\t");
+					break;
+				default:
+					if (((c < 0x0020) || (c > 0x007e))) {
+						sb.append("\\u");
+						sb.append(toHex(c >> 12));
+						sb.append(toHex(c >> 8));
+						sb.append(toHex(c >> 4));
+						sb.append(toHex(c));
+					} else {
+						sb.append(c);
+					}
+			}
+		}
+	}
+
+	StringBuilder access_begin(final String ip, final Date date, //
+			final String method, String uri, String version) {
+		final StringBuilder sb = new StringBuilder(256);
+		sb // common-log
+				.append(ip).append(' ') //
+				.append("- -").append(' ') //
+				.append(getAccessDate(date)).append(' ') //
+				.append('"');
+		escapeLog(method, sb);
+		sb.append(' ');
+		escapeLog(uri, sb);
+		sb.append(' ');
+		escapeLog(version, sb);
+		sb.append("\" ");
+		return sb;
+	}
+
+	void access_end(final StringBuilder sb, final int code, final long size) {
+		if (sb == null) {
+			return;
+		}
+		sb.append(code).append(' ');
+		if (size < 0) {
+			sb.append("-");
+		} else {
+			sb.append(size);
+		}
+		System.out.println(sb.toString());
+	}
+
 	ZipFile zipFile(final File file) throws ZipException, IOException {
+		if (file == null) {
+			return null;
+		}
 		if (file.isFile()) {
 			FileInputStream is = null;
 			try {
@@ -128,24 +287,34 @@ public class HttpServer {
 			ServerSocket server = null;
 			try {
 				server = new ServerSocket();
-				server.setSoTimeout(1000);
+				server.setSoTimeout(acceptTimeout);
 				server.setReuseAddress(true);
-				server.bind(new InetSocketAddress(port));
+				server.bind(new InetSocketAddress(port), acceptBacklog);
+				if (debugLogEnabled) {
+					debug("listener(start)=" + String.valueOf(server));
+				}
 				while (running.get()) {
 					Socket client = null;
 					try {
 						client = server.accept();
+						if (debugLogEnabled) {
+							debug("client(accept)=" + String.valueOf(client));
+						}
 						client.setSoTimeout(readTimeout);
 						pool.submit(new Connection(client));
 					} catch (SocketTimeoutException e) {
 						continue;
 					} catch (Exception e) {
+						e.printStackTrace(System.err);
 						Closer.close(client);
 					}
 				}
 			} catch (IOException e) {
-				e.printStackTrace(System.out);
+				e.printStackTrace(System.err);
 			} finally {
+				if (debugLogEnabled) {
+					debug("listener(end)=" + String.valueOf(server));
+				}
 				Closer.close(server);
 			}
 		}
@@ -171,7 +340,11 @@ public class HttpServer {
 			InputStream fis = null;
 			long fisLength = 0;
 			Date lastModified = null;
+			StringBuilder access_log = null;
 			try {
+				if (debugLogEnabled) {
+					debug("client(start)=" + String.valueOf(client));
+				}
 				in = new BufferedReader(new InputStreamReader(client.getInputStream()), BUFF_LEN);
 				out = new PrintStream(new BufferedOutputStream(client.getOutputStream(), BUFF_LEN));
 				// Read Head (GET / HTTP/1.0)
@@ -184,11 +357,31 @@ public class HttpServer {
 				while (!in.readLine().isEmpty()) {
 					continue;
 				}
-				if (!"HTTP/1.0".equals(VERSION) && !"HTTP/1.1".equals(VERSION)) {
+				final boolean http10 = "HTTP/1.0".equals(VERSION);
+				final boolean http11 = "HTTP/1.1".equals(VERSION);
+				final boolean isGet = "GET".equals(METHOD);
+				final boolean isHead = "HEAD".equals(METHOD);
+				if (!http10 && !http11) {
+					if (accessLogEnabled) {
+						access_log = access_begin(client.getInetAddress().getHostAddress(), new Date(), //
+								METHOD, URI, VERSION);
+					}
 					throw HttpError.HTTP_400;
-				} else if (!"GET".equals(METHOD) && !"HEAD".equals(METHOD)) {
+				} else if (!isGet && !isHead) {
+					if (accessLogEnabled) {
+						access_log = access_begin(client.getInetAddress().getHostAddress(), new Date(), //
+								METHOD, URI, VERSION);
+					}
 					throw HttpError.HTTP_405;
 				} else {
+					if (testEnabled && URI.equals("/test")) {
+						sendResponse(out, 200, "OK", "OK\n", isHead);
+						return;
+					}
+					if (accessLogEnabled) {
+						access_log = access_begin(client.getInetAddress().getHostAddress(), new Date(), //
+								METHOD, URI, VERSION);
+					}
 					if (zipFile != null) {
 						lastModified = new Date(baseDir.lastModified());
 						String zName = mapZipFile(URI);
@@ -201,7 +394,7 @@ public class HttpServer {
 							fisLength = zipEntry.getSize();
 							fis = zipFile.getInputStream(zipEntry);
 						}
-					} else {
+					} else if (baseDir != null) {
 						File f = new File(baseDir, URI).getCanonicalFile();
 						if (!f.getPath().startsWith(baseDir.getPath())) {
 							throw HttpError.HTTP_400;
@@ -218,17 +411,25 @@ public class HttpServer {
 					if (fis == null) {
 						throw HttpError.HTTP_404;
 					}
-					sendFile(fis, out, fisLength, lastModified, !"HEAD".equals(METHOD));
+					sendFile(fis, out, fisLength, lastModified, isHead);
+					access_end(access_log, 200, fisLength);
 				}
 			} catch (HttpError e) {
 				sendError(out, e, e.getHttpText());
+				access_end(access_log, e.getHttpCode(), -1);
 			} catch (URISyntaxException e) {
 				sendError(out, HttpError.HTTP_400, e.getMessage());
+				access_end(access_log, 400, -1);
 			} catch (SocketTimeoutException e) {
 				sendError(out, HttpError.HTTP_408, e.getMessage());
+				access_end(access_log, 408, -1);
 			} catch (IOException e) {
 				sendError(out, HttpError.HTTP_500, e.getMessage());
+				access_end(access_log, 500, -1);
 			} finally {
+				if (debugLogEnabled) {
+					debug("client(end)=" + String.valueOf(client));
+				}
 				Closer.close(fis);
 				Closer.close(in);
 				Closer.close(out);
@@ -247,12 +448,9 @@ public class HttpServer {
 			return uri;
 		}
 
-		synchronized String getHttpDate(final Date d) {
-			return dateFormat.format(d);
-		}
-
-		void sendFile(final InputStream is, final PrintStream out, long length, final Date lastModified,
-				final boolean body) throws IOException {
+		void sendFile(final InputStream is, final PrintStream out, //
+				final long length, final Date lastModified, //
+				final boolean isHead) throws IOException {
 			out.append(HDR_HTTP_VER).append(" 200 OK").append(CRLF);
 			out.append("Content-Length: ").append(String.valueOf(length)).append(CRLF);
 			out.append("Date: ").append(getHttpDate(new Date())).append(CRLF);
@@ -265,7 +463,7 @@ public class HttpServer {
 			out.append(HDR_SERVER).append(CRLF);
 			out.append(CRLF);
 			//
-			if (body) {
+			if (!isHead) {
 				final byte[] buf = new byte[BUFF_LEN];
 				int len = 0;
 				while ((len = is.read(buf)) != -1) {
@@ -276,10 +474,11 @@ public class HttpServer {
 		}
 
 		void sendError(final PrintStream out, final HttpError e, final String body) {
-			sendError(out, e.getHttpCode(), e.getHttpText(), body);
+			sendResponse(out, e.getHttpCode(), e.getHttpText(), body, false);
 		}
 
-		void sendError(final PrintStream out, final int code, final String text, final String body) {
+		void sendResponse(final PrintStream out, final int code, final String text, //
+				final String body, final boolean isHead) {
 			out.append(HDR_HTTP_VER).append(' ').append(String.valueOf(code)).append(' ').append(text)
 					.append(CRLF);
 			out.append("Content-Length: ").append(String.valueOf(body.length())).append(CRLF);
@@ -288,7 +487,9 @@ public class HttpServer {
 			out.append(HDR_CONNECTION_CLOSE).append(CRLF);
 			out.append(HDR_SERVER).append(CRLF);
 			out.append(CRLF);
-			out.append(body);
+			if (!isHead) {
+				out.append(body);
+			}
 			out.flush();
 		}
 	}
@@ -346,6 +547,8 @@ public class HttpServer {
 		static void close(final Socket c) {
 			if (c != null) {
 				try {
+					c.shutdownInput();
+					c.shutdownOutput();
 					c.close();
 				} catch (Exception ign) {
 				}
